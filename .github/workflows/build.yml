@@ -8,55 +8,71 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-managed:
+  build-executables:
     runs-on: windows-latest
     timeout-minutes: 30
 
     steps:
-    - name: 1. Checkout repository
+    - name: 1. 拉取仓库代码
       uses: actions/checkout@v4
 
-    - name: 2. Setup .NET SDK
+    - name: 2. 配置 .NET SDK
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '9.0.x'
 
-    - name: 3. Publish GUI and CLI
+    - name: 3. 动态查找并发布可执行程序
       shell: pwsh
       run: |
-        $guiProj = "Managed Source\Arsenal.ImageMounter.Forms\Arsenal.ImageMounter.Forms.csproj"
-        Write-Host "==== Start publishing GUI ===="
-        if (Test-Path $guiProj) {
-          Write-Host "Found GUI project: $guiProj"
-          dotnet publish $guiProj -c Release -f net10.0-windows -r win-x64 --self-contained true -o ./publish/GUI
-          if ($LASTEXITCODE -ne 0) { Write-Error "GUI publish failed"; exit 1 }
-        } else {
-          Write-Error "GUI project not found at: $guiProj"
-          exit 1
-        }
+        $publishRoot = "$PWD/publish"
+        $foundAny = $false
 
-        $cliDir = "Command line applications"
-        $cliProj = $null
-        Write-Host "==== Start publishing CLI ===="
-        if (Test-Path $cliDir) {
-          Write-Host "Searching for csproj in $cliDir..."
-          $cliProj = Get-ChildItem -Path $cliDir -Recurse -Filter "*.csproj" | Where-Object { $_.Name -notmatch 'Setup' } | Select-Object -First 1
-        }
+        # 递归扫描整个仓库的所有 .csproj 文件
+        $allProjects = Get-ChildItem -Path $PWD -Recurse -Filter "*.csproj"
 
-        if ($cliProj) {
-          Write-Host "Found CLI project: $($cliProj.FullName)"
-          dotnet publish $cliProj.FullName -c Release -f net10.0-windows -r win-x64 --self-contained true -o ./publish/CLI
-          if ($LASTEXITCODE -ne 0) { Write-Error "CLI publish failed"; exit 1 }
-        } else {
-          Write-Warning "CLI project not found in $cliDir."
-          if (Test-Path $cliDir) {
-            Get-ChildItem -Path $cliDir -Recurse -File | Select-Object -First 10 | ForEach-Object { Write-Host " - $($_.FullName)" }
-          } else {
-            Write-Host "Directory $cliDir does not exist."
+        foreach ($proj in $allProjects) {
+          # 跳过安装包项目（Setup）
+          if ($proj.Name -match 'Setup') { continue }
+
+          Write-Host "正在检查项目: $($proj.FullName)"
+
+          # 读取项目文件的 XML 内容，判断 OutputType
+          try {
+            [xml]$projXml = Get-Content $proj.FullName
+            $outputType = $projXml.Project.PropertyGroup.OutputType
+            if (-not $outputType) { $outputType = $projXml.Project.PropertyGroup.OutputType } # 处理多 PropertyGroup 的情况
+
+            # 只发布 OutputType 为 WinExe（GUI）或 Exe（控制台）的项目
+            if ($outputType -match 'WinExe|Exe') {
+              $projName = [System.IO.Path]::GetFileNameWithoutExtension($proj.Name)
+              $publishDir = "$publishRoot/$projName"
+              
+              Write-Host " -> 发现可执行项目 (OutputType: $outputType)，开始发布: $projName"
+              
+              # 指定目标框架 net10.0-windows 进行发布
+              dotnet publish $proj.FullName -c Release -f net10.0-windows -r win-x64 --self-contained true -o $publishDir
+              
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "发布失败: $($proj.FullName)"
+                exit 1
+              }
+              $foundAny = $true
+            } else {
+              Write-Host " -> 跳过 (OutputType: $outputType，非可执行程序)"
+            }
+          } catch {
+            Write-Warning "读取项目文件时出错，跳过: $($proj.FullName)"
           }
         }
 
-    - name: 4. Upload Artifacts
+        if (-not $foundAny) {
+          Write-Error "❌ 在整个仓库中未找到任何可执行项目 (OutputType 为 WinExe 或 Exe)。"
+          exit 1
+        } else {
+          Write-Host "✅ 所有可执行程序发布完成！"
+        }
+
+    - name: 4. 上传构建产物
       uses: actions/upload-artifact@v4
       with:
         name: ArsenalImageMounter-Executables
