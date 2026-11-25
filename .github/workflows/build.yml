@@ -16,43 +16,69 @@ jobs:
     - name: 1. 拉取仓库代码
       uses: actions/checkout@v4
 
-    - name: 2. 配置 .NET SDK
+    - name: 2. 配置 .NET SDK 及环境探针
       uses: actions/setup-dotnet@v4
       with:
-        # 项目截图显示有 ".NET 11 adjustments"，考虑到官方文档建议 6/7/8，这里使用 8.0 以确保高版本兼容性
-        dotnet-version: '8.0.x'
-
-    - name: 3. 指定路径并构建解决方案
+        dotnet-version: '9.0.x'
+        
+    - name: 2.5 [Debug] 打印构建环境信息
       shell: pwsh
       run: |
-        # 直接拼接出基于截图的确切路径
-        $slnPath = Join-Path $PWD "Managed Source\ArsenalImageMounter.sln"
+        Write-Host "==================== 环境诊断 ===================="
+        Write-Host "当前工作目录 (PWD): $PWD"
+        Write-Host "PowerShell 版本: $($PSVersionTable.PSVersion.ToString())"
+        Write-Host "------------------ .NET SDK 信息 ------------------"
+        dotnet --info
+        Write-Host "================== 环境诊断结束 ==================="
+
+    - name: 3. 指定 .slnx 文件并构建
+      shell: pwsh
+      run: |
+        $slnPath = Join-Path $PWD "Managed Source\ArsenalImageMounter.slnx"
         
-        # 检查这个绝对路径的文件是否存在
+        Write-Host "==================== 路径诊断 ===================="
+        Write-Host "尝试寻找目标文件: $slnPath"
+        
         if (Test-Path $slnPath) {
-          Write-Host "成功找到解决方案文件，准备开始构建: $slnPath"
+          Write-Host "✅ 成功找到目标文件！"
+          $fileInfo = Get-Item $slnPath
+          Write-Host "文件大小: $($fileInfo.Length) Bytes, 最后修改时间: $($fileInfo.LastWriteTime)"
           Write-Host "==================================================="
           
-          # 执行构建
-          dotnet build $slnPath --configuration Release
+          Write-Host "开始执行编译命令..."
+          # 加入 --verbosity normal 让编译输出更详细
+          dotnet build $slnPath --configuration Release --verbosity normal
           
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "构建失败！"
+            Write-Error "❌ 编译失败！dotnet build 返回了非零退出码 ($LASTEXITCODE)。请查看上方日志的 Error 信息。"
             exit 1
           }
+          Write-Host "✅ 编译成功！"
         } else {
-          Write-Host "【排错信息】未找到指定的文件: $slnPath"
-          Write-Host "当前工作目录是: $PWD"
-          Write-Host "尝试列出当前目录下所有 .sln 文件："
-          # 如果还是找不到，打印出真实存在的 .sln 以便排查
-          Get-ChildItem -Path . -Recurse -Include *.sln, *.slnx | ForEach-Object { Write-Host $_.FullName }
-          Write-Error "构建终止：无法确定 .sln 路径。"
+          Write-Host "❌ 未找到目标文件！开始执行查错... "
+          Write-Host "当前 'Managed Source' 目录下存在的文件："
+          if (Test-Path "Managed Source") {
+            Get-ChildItem -Path "Managed Source" | ForEach-Object { Write-Host "  - $($_.Name)" }
+          } else {
+            Write-Host "  - 'Managed Source' 文件夹都不存在！"
+          }
+
+          Write-Host "当前仓库全局存在的 .sln / .slnx 文件："
+          $foundFiles = Get-ChildItem -Path . -Recurse -Include *.sln, *.slnx
+          if ($foundFiles) {
+             $foundFiles | ForEach-Object { Write-Host "  - $($_.FullName)" }
+          } else {
+             Write-Host "  - 竟然一个都没找到！"
+          }
+          Write-Error "构建终止：无法确定 .slnx 路径。"
           exit 1
         }
 
-    - name: 4. 上传构建产物
+    - name: 4. [Debug] 检查产物并上传
+      if: always() # 即使前面失败了，也要跑这一步看看有没有留下点编译残骸
       uses: actions/upload-artifact@v4
       with:
         name: ArsenalImageMounter-Managed-Build
         path: |
           **/bin/Release/**
+        if-no-files-found: warn # 如果没找到产物，不报错，只给警告
