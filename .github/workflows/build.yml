@@ -1,0 +1,44 @@
+name: Build Arsenal Image Mounter (Managed .NET)
+
+on:
+  push:
+    branches: [ master, main ]  # 请根据你的默认分支名称调整
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:            # 支持在Actions页面手动点击运行
+
+jobs:
+  build-managed:
+    runs-on: windows-latest    # 托管代码可在 Windows 环境下构建
+    timeout-minutes: 30
+
+    steps:
+    - name: 1. 拉取仓库代码
+      uses: actions/checkout@v4
+
+    - name: 2. 配置 .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        # 根据 How-to-build.md，项目支持 .NET 6.0 或 7.0，这里选用 7.0
+        dotnet-version: '7.0.x'
+
+    - name: 3. 自动查找并构建解决方案
+      shell: pwsh
+      run: |
+        # 在仓库中递归查找第一个 .sln 文件
+        $solution = Get-ChildItem -Path . -Recurse -Filter *.sln | Select-Object -First 1
+        if (-not $solution) {
+          Write-Error "错误：在仓库中未找到任何 .sln 解决方案文件。"
+          exit 1
+        }
+        Write-Host "找到解决方案文件: $($solution.FullName)"
+        # 执行构建，配置为 Release
+        dotnet build $solution.FullName --configuration Release
+
+    - name: 4. 上传构建产物
+      uses: actions/upload-artifact@v4
+      with:
+        name: ArsenalImageMounter-Managed-Build
+        # 打包所有 Release 目录下的输出，涵盖 GUI、CLI 等工具
+        path: |
+          **/bin/Release/**
