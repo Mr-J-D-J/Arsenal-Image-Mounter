@@ -1,4 +1,4 @@
-name: Build Arsenal Image Mounter (Managed .NET)
+name: Build Arsenal Image Mounter Executables
 
 on:
   push:
@@ -16,69 +16,55 @@ jobs:
     - name: 1. 拉取仓库代码
       uses: actions/checkout@v4
 
-    - name: 2. 配置 .NET SDK 及环境探针
+    - name: 2. 配置 .NET SDK
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '9.0.x'
-        
-    - name: 2.5 [Debug] 打印构建环境信息
-      shell: pwsh
-      run: |
-        Write-Host "==================== 环境诊断 ===================="
-        Write-Host "当前工作目录 (PWD): $PWD"
-        Write-Host "PowerShell 版本: $($PSVersionTable.PSVersion.ToString())"
-        Write-Host "------------------ .NET SDK 信息 ------------------"
-        dotnet --info
-        Write-Host "================== 环境诊断结束 ==================="
 
-    - name: 3. 指定 .slnx 文件并构建
+    - name: 3. 发布 GUI 和 CLI 程序
       shell: pwsh
       run: |
-        $slnPath = Join-Path $PWD "Managed Source\ArsenalImageMounter.slnx"
-        
-        Write-Host "==================== 路径诊断 ===================="
-        Write-Host "尝试寻找目标文件: $slnPath"
-        
-        if (Test-Path $slnPath) {
-          Write-Host "✅ 成功找到目标文件！"
-          $fileInfo = Get-Item $slnPath
-          Write-Host "文件大小: $($fileInfo.Length) Bytes, 最后修改时间: $($fileInfo.LastWriteTime)"
-          Write-Host "==================================================="
-          
-          Write-Host "开始执行编译命令..."
-          # 加入 --verbosity normal 让编译输出更详细
-          dotnet build $slnPath --configuration Release --verbosity normal
-          
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "❌ 编译失败！dotnet build 返回了非零退出码 ($LASTEXITCODE)。请查看上方日志的 Error 信息。"
-            exit 1
-          }
-          Write-Host "✅ 编译成功！"
+        # ========== GUI：路径已核实，直接使用 ==========
+        $guiProj = "Managed Source\Arsenal.ImageMounter.Forms\Arsenal.ImageMounter.Forms.csproj"
+
+        Write-Host "==================== 开始发布 GUI ===================="
+        if (Test-Path $guiProj) {
+          Write-Host "✅ 找到 GUI 项目: $guiProj"
+          dotnet publish $guiProj -c Release -r win-x64 --self-contained true -o ./publish/GUI
+          if ($LASTEXITCODE -ne 0) { Write-Error "GUI 发布失败！"; exit 1 }
         } else {
-          Write-Host "❌ 未找到目标文件！开始执行查错... "
-          Write-Host "当前 'Managed Source' 目录下存在的文件："
-          if (Test-Path "Managed Source") {
-            Get-ChildItem -Path "Managed Source" | ForEach-Object { Write-Host "  - $($_.Name)" }
-          } else {
-            Write-Host "  - 'Managed Source' 文件夹都不存在！"
-          }
-
-          Write-Host "当前仓库全局存在的 .sln / .slnx 文件："
-          $foundFiles = Get-ChildItem -Path . -Recurse -Include *.sln, *.slnx
-          if ($foundFiles) {
-             $foundFiles | ForEach-Object { Write-Host "  - $($_.FullName)" }
-          } else {
-             Write-Host "  - 竟然一个都没找到！"
-          }
-          Write-Error "构建终止：无法确定 .slnx 路径。"
+          Write-Error "❌ 未找到 GUI 项目！路径: $guiProj"
           exit 1
         }
 
-    - name: 4. [Debug] 检查产物并上传
-      if: always() # 即使前面失败了，也要跑这一步看看有没有留下点编译残骸
+        # ========== CLI：在真实存在的 "Command line applications" 目录下动态查找 ==========
+        Write-Host "==================== 开始发布 CLI ===================="
+        $cliDir = "Command line applications"
+        $cliProj = $null
+
+        if (Test-Path $cliDir) {
+          Write-Host "在 '$cliDir' 目录下搜索 .csproj（排除 Setup 安装项目）..."
+          $cliProj = Get-ChildItem -Path $cliDir -Recurse -Filter "*.csproj" | Where-Object { $_.Name -notmatch 'Setup' } | Select-Object -First 1
+        }
+
+        if ($cliProj) {
+          Write-Host "✅ 找到 CLI 项目: $($cliProj.FullName)"
+          dotnet publish $cliProj.FullName -c Release -r win-x64 --self-contained true -o ./publish/CLI
+          if ($LASTEXITCODE -ne 0) { Write-Error "CLI 发布失败！"; exit 1 }
+        } else {
+          Write-Warning "⚠️ 未在 '$cliDir' 下找到 CLI 项目（.csproj）。"
+          Write-Host "该目录下实际存在的文件（前20个）："
+          if (Test-Path $cliDir) {
+            Get-ChildItem -Path $cliDir -Recurse -File | Select-Object -First 20 | ForEach-Object { Write-Host "  - $($_.FullName)" }
+          } else {
+            Write-Host "  - 目录 '$cliDir' 本身不存在！"
+          }
+        }
+
+    - name: 4. 上传最终程序
       uses: actions/upload-artifact@v4
       with:
-        name: ArsenalImageMounter-Managed-Build
+        name: ArsenalImageMounter-Executables
         path: |
-          **/bin/Release/**
-        if-no-files-found: warn # 如果没找到产物，不报错，只给警告
+          ./publish/**
+        if-no-files-found: warn
