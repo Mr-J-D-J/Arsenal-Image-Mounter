@@ -25,16 +25,25 @@ jobs:
     - name: 3. 自动查找并构建解决方案
       shell: pwsh
       run: |
-        # 在仓库中递归查找第一个 .sln 文件
-        $solution = Get-ChildItem -Path . -Recurse -Filter *.sln | Select-Object -First 1
+        # 精准定位到 Managed Source 目录下查找 .sln，避开 Unmanaged (C++)
+        $solution = Get-ChildItem -Path "API/Managed Source" -Filter *.sln | Select-Object -First 1
+        
+        # 备用方案：如果上面没找到，在根目录非递归地找（通常项目结构是固定的，这里强制指定）
         if (-not $solution) {
-          Write-Error "错误：在仓库中未找到任何 .sln 解决方案文件。"
+          # 如果你的路径里没有 "API" 这一层，请把上面的 Path 改成 "./Managed Source"
+          $solution = Get-ChildItem -Path . -Filter *.sln | Select-Object -First 1
+        }
+
+        if (-not $solution) {
+          Write-Error "错误：未找到托管代码(.NET)的 .sln 文件。请检查路径。"
           exit 1
         }
+        
         Write-Host "找到解决方案文件: $($solution.FullName)"
+        
         # 执行构建，配置为 Release
         dotnet build $solution.FullName --configuration Release
-
+        
     - name: 4. 上传构建产物
       uses: actions/upload-artifact@v4
       with:
