@@ -13,55 +13,50 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - name: 1. 拉取仓库代码
+    - name: 1. Checkout repository
       uses: actions/checkout@v4
 
-    - name: 2. 配置 .NET SDK
+    - name: 2. Setup .NET SDK
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '9.0.x'
 
-    - name: 3. 发布 GUI 和 CLI 程序
+    - name: 3. Publish GUI and CLI
       shell: pwsh
       run: |
-        # ========== GUI：路径已核实，直接使用 ==========
         $guiProj = "Managed Source\Arsenal.ImageMounter.Forms\Arsenal.ImageMounter.Forms.csproj"
-
-        Write-Host "==================== 开始发布 GUI ===================="
+        Write-Host "==== Start publishing GUI ===="
         if (Test-Path $guiProj) {
-          Write-Host "✅ 找到 GUI 项目: $guiProj"
-          dotnet publish $guiProj -c Release -r win-x64 --self-contained true -o ./publish/GUI
-          if ($LASTEXITCODE -ne 0) { Write-Error "GUI 发布失败！"; exit 1 }
+          Write-Host "Found GUI project: $guiProj"
+          dotnet publish $guiProj -c Release -f net10.0-windows -r win-x64 --self-contained true -o ./publish/GUI
+          if ($LASTEXITCODE -ne 0) { Write-Error "GUI publish failed"; exit 1 }
         } else {
-          Write-Error "❌ 未找到 GUI 项目！路径: $guiProj"
+          Write-Error "GUI project not found at: $guiProj"
           exit 1
         }
 
-        # ========== CLI：在真实存在的 "Command line applications" 目录下动态查找 ==========
-        Write-Host "==================== 开始发布 CLI ===================="
         $cliDir = "Command line applications"
         $cliProj = $null
-
+        Write-Host "==== Start publishing CLI ===="
         if (Test-Path $cliDir) {
-          Write-Host "在 '$cliDir' 目录下搜索 .csproj（排除 Setup 安装项目）..."
+          Write-Host "Searching for csproj in $cliDir..."
           $cliProj = Get-ChildItem -Path $cliDir -Recurse -Filter "*.csproj" | Where-Object { $_.Name -notmatch 'Setup' } | Select-Object -First 1
         }
 
         if ($cliProj) {
-          Write-Host "✅ 找到 CLI 项目: $($cliProj.FullName)"
-          dotnet publish $cliProj.FullName -c Release -r win-x64 --self-contained true -o ./publish/CLI
-          if ($LASTEXITCODE -ne 0) { Write-Error "CLI 发布失败！"; exit 1 }
+          Write-Host "Found CLI project: $($cliProj.FullName)"
+          dotnet publish $cliProj.FullName -c Release -f net10.0-windows -r win-x64 --self-contained true -o ./publish/CLI
+          if ($LASTEXITCODE -ne 0) { Write-Error "CLI publish failed"; exit 1 }
         } else {
-          Write-Warning "⚠️ 未在 '$cliDir' 下找到 CLI 项目（.csproj）。"
-          Write-Host "该目录下实际存在的文件（前20个）："
+          Write-Warning "CLI project not found in $cliDir."
           if (Test-Path $cliDir) {
-            Get-ChildItem -Path $cliDir -Recurse -File | Select-Object -First 20 | ForEach-Object { Write-Host "  - $($_.FullName)" }
+            Get-ChildItem -Path $cliDir -Recurse -File | Select-Object -First 10 | ForEach-Object { Write-Host " - $($_.FullName)" }
           } else {
-            Write-Host "  - 目录 '$cliDir' 本身不存在！"
+            Write-Host "Directory $cliDir does not exist."
           }
         }
 
-    - name: 4. 上传最终程序
+    - name: 4. Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: ArsenalImageMounter-Executables
