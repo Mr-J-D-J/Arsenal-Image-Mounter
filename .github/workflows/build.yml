@@ -19,36 +19,36 @@ jobs:
     - name: 2. 配置 .NET SDK
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '7.0.x'
+        # 项目截图显示有 ".NET 11 adjustments"，考虑到官方文档建议 6/7/8，这里使用 8.0 以确保高版本兼容性
+        dotnet-version: '8.0.x'
 
-    - name: 3. 查找并构建所有托管解决方案
+    - name: 3. 指定路径并构建解决方案
       shell: pwsh
       run: |
-        Write-Host "开始全局查找 .sln 文件..."
+        # 直接拼接出基于截图的确切路径
+        $slnPath = Join-Path $PWD "Managed Source\ArsenalImageMounter.sln"
         
-        # 找遍全仓库的 .sln 文件，但是强行过滤掉名字里带有 "Unmanaged Source" 的路径
-        $solutions = Get-ChildItem -Path . -Recurse -Filter *.sln | Where-Object { $_.FullName -notmatch 'Unmanaged Source' }
-
-        if (-not $solutions) {
-          Write-Error "错误：未找到任何 C# 的 .sln 文件！"
-          exit 1
-        }
-
-        # 循环构建找到的每一个 .sln（GUI 和 CLI 通常是分开的）
-        foreach ($sln in $solutions) {
-          Write-Host "==================================================="
-          Write-Host "正在构建解决方案: $($sln.FullName)"
+        # 检查这个绝对路径的文件是否存在
+        if (Test-Path $slnPath) {
+          Write-Host "成功找到解决方案文件，准备开始构建: $slnPath"
           Write-Host "==================================================="
           
-          dotnet build $sln.FullName --configuration Release
+          # 执行构建
+          dotnet build $slnPath --configuration Release
           
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "构建失败: $($sln.FullName)"
+            Write-Error "构建失败！"
             exit 1
           }
+        } else {
+          Write-Host "【排错信息】未找到指定的文件: $slnPath"
+          Write-Host "当前工作目录是: $PWD"
+          Write-Host "尝试列出当前目录下所有 .sln 文件："
+          # 如果还是找不到，打印出真实存在的 .sln 以便排查
+          Get-ChildItem -Path . -Recurse -Include *.sln, *.slnx | ForEach-Object { Write-Host $_.FullName }
+          Write-Error "构建终止：无法确定 .sln 路径。"
+          exit 1
         }
-        
-        Write-Host "所有托管代码构建完成！"
 
     - name: 4. 上传构建产物
       uses: actions/upload-artifact@v4
