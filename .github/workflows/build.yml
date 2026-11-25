@@ -2,14 +2,14 @@ name: Build Arsenal Image Mounter (Managed .NET)
 
 on:
   push:
-    branches: [ master, main ]  # 请根据你的默认分支名称调整
+    branches: [ master, main ]
   pull_request:
     branches: [ master, main ]
-  workflow_dispatch:            # 支持在Actions页面手动点击运行
+  workflow_dispatch:
 
 jobs:
   build-managed:
-    runs-on: windows-latest    # 托管代码可在 Windows 环境下构建
+    runs-on: windows-latest
     timeout-minutes: 30
 
     steps:
@@ -19,35 +19,40 @@ jobs:
     - name: 2. 配置 .NET SDK
       uses: actions/setup-dotnet@v4
       with:
-        # 根据 How-to-build.md，项目支持 .NET 6.0 或 7.0，这里选用 7.0
         dotnet-version: '7.0.x'
 
-    - name: 3. 自动查找并构建解决方案
+    - name: 3. 查找并构建所有托管解决方案
       shell: pwsh
       run: |
-        # 精准定位到 Managed Source 目录下查找 .sln，避开 Unmanaged (C++)
-        $solution = Get-ChildItem -Path "API/Managed Source" -Filter *.sln | Select-Object -First 1
+        Write-Host "开始全局查找 .sln 文件..."
         
-        # 备用方案：如果上面没找到，在根目录非递归地找（通常项目结构是固定的，这里强制指定）
-        if (-not $solution) {
-          # 如果你的路径里没有 "API" 这一层，请把上面的 Path 改成 "./Managed Source"
-          $solution = Get-ChildItem -Path . -Filter *.sln | Select-Object -First 1
-        }
+        # 找遍全仓库的 .sln 文件，但是强行过滤掉名字里带有 "Unmanaged Source" 的路径
+        $solutions = Get-ChildItem -Path . -Recurse -Filter *.sln | Where-Object { $_.FullName -notmatch 'Unmanaged Source' }
 
-        if (-not $solution) {
-          Write-Error "错误：未找到托管代码(.NET)的 .sln 文件。请检查路径。"
+        if (-not $solutions) {
+          Write-Error "错误：未找到任何 C# 的 .sln 文件！"
           exit 1
         }
+
+        # 循环构建找到的每一个 .sln（GUI 和 CLI 通常是分开的）
+        foreach ($sln in $solutions) {
+          Write-Host "==================================================="
+          Write-Host "正在构建解决方案: $($sln.FullName)"
+          Write-Host "==================================================="
+          
+          dotnet build $sln.FullName --configuration Release
+          
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "构建失败: $($sln.FullName)"
+            exit 1
+          }
+        }
         
-        Write-Host "找到解决方案文件: $($solution.FullName)"
-        
-        # 执行构建，配置为 Release
-        dotnet build $solution.FullName --configuration Release
-        
+        Write-Host "所有托管代码构建完成！"
+
     - name: 4. 上传构建产物
       uses: actions/upload-artifact@v4
       with:
         name: ArsenalImageMounter-Managed-Build
-        # 打包所有 Release 目录下的输出，涵盖 GUI、CLI 等工具
         path: |
           **/bin/Release/**
