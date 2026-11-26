@@ -5,6 +5,21 @@
 
 ---
 
+## 0. 先看这里：我该用哪个脚本
+
+| 我想要什么 | 用哪个 | 怎么触发 |
+| --- | --- | --- |
+| **一个能双击运行的 exe**（最常见） | `build.yml` | 不用管，push 就自动跑；下载 `ArsenalImageMounter-GUI-net10-x64-single` 这个 artifact |
+| 体积最小的版本（依赖系统自带 .NET Framework） | `build.yml` | 同上，下载 `ArsenalImageMounter-GUI-net48` |
+| 自包含的文件夹版（不打包成单文件） | `build.yml` | 同上，下载 `ArsenalImageMounter-GUI-net10-x64` |
+| 发版，让别人直接下 exe | `build.yml` | 打一个 `v*` tag，会自动挂到 Release 页面 |
+| 命令行工具 `aim_cli`、Analyze、PowerShell 模块、NuGet 包 | `build-all.yml` | **不会自动触发**，去 Actions 页面手动 `Run workflow` |
+| 跑单元测试 | `build-all.yml` | 手动触发时勾上 `run_tests` |
+
+一句话区别：**`build.yml` = 日常自动出 GUI 成品；`build-all.yml` = 手动出全套（含 CLI / 包 / 测试）。**
+
+---
+
 ## 1. 两个工作流，各管什么
 
 | 文件 | 触发方式 | 产出 | 用途 |
