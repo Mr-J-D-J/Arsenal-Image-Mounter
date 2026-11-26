@@ -21,13 +21,14 @@
 #   <TargetFrameworks>net48;netstandard2.1;net10.0;net11.0</TargetFrameworks>
 # 用 9.x SDK 会直接 NETSDK1045（当前 SDK 不支持目标框架）。
 #
-# 三个变体
-# --------
+# 三个变体（第一个是默认产物：真正的单文件 exe）
+# ----------------------------------------------
+#   net10-x64-single   【默认】自包含 + 单文件，**就一个 exe，双击即用**，
+#                      不需要装任何运行时。两个 exe 各约 57 MB。
+#                      打 tag 时还会把这两个 .exe 直接挂到 Release 页面。
 #   net48              目标机只要装了 .NET Framework 4.8（Win10 1903+ 自带）即可，
-#                      产物约 13 MB —— 体积最小，但必须整个文件夹一起拷。
-#   net10-x64          自包含，不需要任何运行时，产物约 103 MB，同样是文件夹。
-#   net10-x64-single   自包含 + 单文件，产物约 60-100 MB，**就一个 exe**，
-#                      拷到任意 x64 Windows 上双击即用。
+#                      解压后约 13 MB —— 体积最小，但必须整个文件夹一起拷。
+#   net10-x64          自包含，不需要任何运行时，解压后约 103 MB，同样是文件夹。
 #
 # 注意：Arsenal.ImageMounter.Forms 是**类库**（没有 Program.cs / Main），
 #       不能用 -p:OutputType=WinExe 强行发布成 exe。
@@ -67,6 +68,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # 默认变体放第一个：单文件 exe，最省事的分发形态。
+          - variant: net10-x64-single
+            tfm: net10.0-windows
+            rid: win-x64
+            single: 'true'
           - variant: net48
             tfm: net48
             rid: ''
@@ -75,10 +81,6 @@ jobs:
             tfm: net10.0-windows
             rid: win-x64
             single: 'false'
-          - variant: net10-x64-single
-            tfm: net10.0-windows
-            rid: win-x64
-            single: 'true'
 
     steps:
       - name: Checkout
@@ -308,9 +310,35 @@ jobs:
         with:
           path: artifacts
 
+      - name: Collect files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path release-files | Out-Null
+
+          # 所有 zip / sha256 直接作为 release 资产
+          Get-ChildItem -Path artifacts -Recurse -File |
+            Where-Object { $_.Extension -in '.zip', '.sha256' } |
+            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination release-files -Force }
+
+          # 单文件变体再把两个 exe 单独拎出来，这样 Release 页面可以直接下 .exe，
+          # 不用先解压 zip —— 这就是"直接生成 exe"的那个。
+          $single = Get-ChildItem -Path artifacts -Recurse -File -Filter 'ArsenalImageMounter-GUI-net10-x64-single.zip' |
+                    Select-Object -First 1
+          if (-not $single) { throw "找不到 net10-x64-single 的 zip，无法提取单文件 exe" }
+
+          $tmp = Join-Path $env:RUNNER_TEMP 'single'
+          Expand-Archive -LiteralPath $single.FullName -DestinationPath $tmp -Force
+          $exes = @(Get-ChildItem -Path $tmp -Recurse -File -Filter *.exe)
+          if ($exes.Count -eq 0) { throw "单文件 zip 里没有 exe" }
+          foreach ($e in $exes) { Copy-Item -LiteralPath $e.FullName -Destination release-files -Force }
+
+          Get-ChildItem -LiteralPath release-files | Select-Object Name, Length |
+            Format-Table -AutoSize | Out-String | Write-Host
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.zip
+          files: release-files/*
           generate_release_notes: true
           fail_on_unmatched_files: true
