@@ -1,4 +1,4 @@
-name: Build Arsenal Image Mounter Executables
+name: Build Arsenal Image Mounter GUI
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-executables:
+  build-gui:
     runs-on: windows-latest
     timeout-minutes: 30
 
@@ -19,63 +19,41 @@ jobs:
     - name: 2. 配置 .NET SDK
       uses: actions/setup-dotnet@v4
       with:
+        # 项目里有 net10.0-windows，使用最新的 .NET 9 SDK 保证兼容性
         dotnet-version: '9.0.x'
 
-    - name: 3. 动态查找并发布可执行程序
+    - name: 3. 动态查找并发布 GUI 程序
       shell: pwsh
       run: |
-        $publishRoot = "$PWD/publish"
-        $foundAny = $false
-
-        # 递归扫描整个仓库的所有 .csproj 文件
-        $allProjects = Get-ChildItem -Path $PWD -Recurse -Filter "*.csproj"
-
-        foreach ($proj in $allProjects) {
-          # 跳过安装包项目（Setup）
-          if ($proj.Name -match 'Setup') { continue }
-
-          Write-Host "正在检查项目: $($proj.FullName)"
-
-          # 读取项目文件的 XML 内容，判断 OutputType
-          try {
-            [xml]$projXml = Get-Content $proj.FullName
-            $outputType = $projXml.Project.PropertyGroup.OutputType
-            if (-not $outputType) { $outputType = $projXml.Project.PropertyGroup.OutputType } # 处理多 PropertyGroup 的情况
-
-            # 只发布 OutputType 为 WinExe（GUI）或 Exe（控制台）的项目
-            if ($outputType -match 'WinExe|Exe') {
-              $projName = [System.IO.Path]::GetFileNameWithoutExtension($proj.Name)
-              $publishDir = "$publishRoot/$projName"
-              
-              Write-Host " -> 发现可执行项目 (OutputType: $outputType)，开始发布: $projName"
-              
-              # 指定目标框架 net10.0-windows 进行发布
-              dotnet publish $proj.FullName -c Release -f net10.0-windows -r win-x64 --self-contained true -o $publishDir
-              
-              if ($LASTEXITCODE -ne 0) {
-                Write-Error "发布失败: $($proj.FullName)"
-                exit 1
-              }
-              $foundAny = $true
-            } else {
-              Write-Host " -> 跳过 (OutputType: $outputType，非可执行程序)"
-            }
-          } catch {
-            Write-Warning "读取项目文件时出错，跳过: $($proj.FullName)"
-          }
-        }
-
-        if (-not $foundAny) {
-          Write-Error "❌ 在整个仓库中未找到任何可执行项目 (OutputType 为 WinExe 或 Exe)。"
+        Write-Host "==================== 开始搜索 GUI 项目 ===================="
+        
+        # 动态搜索 Managed Source 下的 Forms 项目，彻底避免路径拼写错误
+        $guiProj = Get-ChildItem -Path "Managed Source" -Recurse -Filter "*Forms*.csproj" | Select-Object -First 1
+        
+        if (-not $guiProj) {
+          Write-Error "❌ 未在 Managed Source 下找到 Forms 项目文件！请检查目录结构。"
           exit 1
-        } else {
-          Write-Host "✅ 所有可执行程序发布完成！"
         }
+        
+        Write-Host "✅ 找到 GUI 项目路径: $($guiProj.FullName)"
+        Write-Host "==================== 开始发布 GUI ===================="
+        
+        # 执行发布
+        # -f net10.0-windows：指定框架（之前日志已确认支持）
+        # -p:OutputType=WinExe：强制将其编译为 Windows 可执行程序（.exe），防止它默认编译成类库
+        dotnet publish $guiProj.FullName -c Release -f net10.0-windows -r win-x64 --self-contained true -p:OutputType=WinExe -o ./publish/GUI
+        
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "❌ GUI 发布失败！请查看上方日志。"
+          exit 1
+        }
+        
+        Write-Host "✅ GUI 发布成功！"
 
     - name: 4. 上传构建产物
       uses: actions/upload-artifact@v4
       with:
-        name: ArsenalImageMounter-Executables
+        name: ArsenalImageMounter-GUI
         path: |
-          ./publish/**
+          ./publish/GUI/**
         if-no-files-found: warn
