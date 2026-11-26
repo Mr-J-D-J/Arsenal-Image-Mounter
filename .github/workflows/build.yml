@@ -21,11 +21,13 @@
 #   <TargetFrameworks>net48;netstandard2.1;net10.0;net11.0</TargetFrameworks>
 # 用 9.x SDK 会直接 NETSDK1045（当前 SDK 不支持目标框架）。
 #
-# 为什么发布的是 net48 和 net10.0-windows 两个变体
-# ------------------------------------------------
-#   net48        目标机只要装了 .NET Framework 4.8（Win10 1903+ 自带）即可运行，
-#                产物约 11 MB —— 最常用的分发形态。
-#   net10-x64    自包含，不需要任何运行时，产物约 127 MB。
+# 三个变体
+# --------
+#   net48              目标机只要装了 .NET Framework 4.8（Win10 1903+ 自带）即可，
+#                      产物约 13 MB —— 体积最小，但必须整个文件夹一起拷。
+#   net10-x64          自包含，不需要任何运行时，产物约 103 MB，同样是文件夹。
+#   net10-x64-single   自包含 + 单文件，产物约 60-100 MB，**就一个 exe**，
+#                      拷到任意 x64 Windows 上双击即用。
 #
 # 注意：Arsenal.ImageMounter.Forms 是**类库**（没有 Program.cs / Main），
 #       不能用 -p:OutputType=WinExe 强行发布成 exe。
@@ -68,9 +70,15 @@ jobs:
           - variant: net48
             tfm: net48
             rid: ''
+            single: 'false'
           - variant: net10-x64
             tfm: net10.0-windows
             rid: win-x64
+            single: 'false'
+          - variant: net10-x64-single
+            tfm: net10.0-windows
+            rid: win-x64
+            single: 'true'
 
     steps:
       - name: Checkout
@@ -118,7 +126,9 @@ jobs:
 
           $tfm = '${{ matrix.tfm }}'
           $rid = '${{ matrix.rid }}'
-          $dist = "dist/ArsenalImageMounter-GUI-${{ matrix.variant }}"
+          $single = ('${{ matrix.single }}' -eq 'true')
+          $variant = '${{ matrix.variant }}'
+          $dist = "dist/ArsenalImageMounter-GUI-$variant"
 
           function Publish-Aim {
             param([string]$Project, [string]$OutDir)
@@ -139,6 +149,17 @@ jobs:
             # net48 不支持 RID / self-contained，只有 netX.0 才能指定。
             if ($rid) { $dargs += @('-r', $rid, '--self-contained', 'true') }
 
+            if ($single) {
+              # 只加 PublishSingleFile 是不够的：libewf.dll / libqcow.dll 这些是
+              # P/Invoke 加载的原生库，默认被排除在单文件之外，运行时找不到会直接崩。
+              # 必须同时 IncludeNativeLibrariesForSelfExtract，让它们自解压到临时目录。
+              $dargs += @(
+                '-p:PublishSingleFile=true'
+                '-p:IncludeNativeLibrariesForSelfExtract=true'
+                '-p:EnableCompressionInSingleFile=true'
+              )
+            }
+
             Write-Host "dotnet $($dargs -join ' ')"
             dotnet @dargs
             if ($LASTEXITCODE -ne 0) { throw "发布失败: $Project (退出码 $LASTEXITCODE)" }
@@ -154,39 +175,87 @@ jobs:
           Publish-Aim 'Managed Source/ArsenalImageMounterMountTool/ArsenalImageMounterMountTool.vbproj' "$dist/MountTool"
           Publish-Aim 'Managed Source/ArsenalImageMounterGUISetup/ArsenalImageMounterGUISetup.vbproj' "$dist/DriverSetup"
 
+          if ($single) {
+            # 单文件发布：两个 exe 提到 dist 根目录，其余（已被打包进 exe 的 dll）全删掉。
+            foreach ($rel in @('MountTool/ArsenalImageMounterMountTool.exe',
+                               'DriverSetup/ArsenalImageMounterGUISetup.exe')) {
+              $src = Join-Path $dist $rel
+              if (-not (Test-Path -LiteralPath $src)) { throw "单文件发布未产出预期文件: $src" }
+              Move-Item -LiteralPath $src -Destination $dist -Force
+            }
+            foreach ($sub in @('MountTool', 'DriverSetup')) {
+              $p = Join-Path $dist $sub
+              if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force }
+            }
+          }
+
           # 这里用字符串数组而不是 here-string：here-string 的结束符 "@ 必须顶格写，
           # 而 YAML 块标量要求所有续行都有缩进，顶格会直接把 YAML 解析搞崩。
-          $readme = @(
-            "Arsenal Image Mounter — GUI (${{ matrix.variant }})"
-            '===================================================='
-            ''
-            'MountTool\ArsenalImageMounterMountTool.exe'
-            '    可视化挂载工具。直接双击运行，首次启动会提示安装虚拟 SCSI 驱动'
-            '    （驱动已内嵌在 exe 里，来自 DriverSetup/DriverFiles.zip，无需联网）。'
-            '    需要管理员权限。'
-            ''
-            'DriverSetup\ArsenalImageMounterGUISetup.exe'
-            '    独立的驱动安装/卸载器。只想装驱动、不想开挂载界面时用它。'
-            ''
-            '系统要求'
-            '    仅支持 Windows x64。'
-            ''
-            '运行时依赖'
-            '    net48 变体：需要 .NET Framework 4.8（Windows 10 1903 及以上系统自带）。'
-            '    net10-x64 变体：自包含发布，不需要预装任何 .NET 运行时。'
-            ''
-            '说明'
-            '    仓库 Graphical applications/ 下只有 "Graphical application moved.txt"，'
-            '    带商业功能的 ArsenalImageMounter.exe 主程序已移至 https://ArsenalRecon.com 。'
-            '    本包内是仓库内真实存在的开源 GUI 工具（ArsenalImageMounterMountTool）。'
-          )
+          if ($single) {
+            $readme = @(
+              "Arsenal Image Mounter — GUI 单文件版 ($variant)"
+              '================================================='
+              ''
+              'ArsenalImageMounterMountTool.exe'
+              '    可视化挂载工具。单文件，直接双击运行，首次启动会提示安装虚拟 SCSI 驱动'
+              '    （驱动已内嵌在 exe 里，来自 DriverSetup/DriverFiles.zip，无需联网）。'
+              '    需要管理员权限。'
+              ''
+              'ArsenalImageMounterGUISetup.exe'
+              '    独立的驱动安装/卸载器，同样是单文件。'
+              ''
+              '系统要求'
+              '    仅支持 Windows x64。'
+              ''
+              '运行时依赖'
+              '    无。自包含 + 单文件，不需要预装任何 .NET 运行时。'
+              ''
+              '注意'
+              '    首次启动会把原生库（libewf / libqcow / libaff4 等）自解压到'
+              '    %TEMP%\.net\ 下，因此会慢一两秒；之后有缓存就快了。'
+              '    这是单文件发布的固有行为，不是故障。'
+              ''
+              '说明'
+              '    仓库 Graphical applications/ 下只有 "Graphical application moved.txt"，'
+              '    带商业功能的 ArsenalImageMounter.exe 主程序已移至 https://ArsenalRecon.com 。'
+              '    本包内是仓库内真实存在的开源 GUI 工具（ArsenalImageMounterMountTool）。'
+            )
+          }
+          else {
+            $readme = @(
+              "Arsenal Image Mounter — GUI ($variant)"
+              '========================================'
+              ''
+              'MountTool\ArsenalImageMounterMountTool.exe'
+              '    可视化挂载工具。直接双击运行，首次启动会提示安装虚拟 SCSI 驱动'
+              '    （驱动已内嵌在 exe 里，来自 DriverSetup/DriverFiles.zip，无需联网）。'
+              '    需要管理员权限。'
+              ''
+              '    ！！注意：必须保留 MountTool 目录下所有 dll，不能只拷 exe。'
+              '    原生库（libewf / libqcow / libaff4 / bzip2 等）由 P/Invoke 加载，'
+              '    合并不进托管程序集。想要单文件版请用 net10-x64-single 变体。'
+              ''
+              'DriverSetup\ArsenalImageMounterGUISetup.exe'
+              '    独立的驱动安装/卸载器。只想装驱动、不想开挂载界面时用它。'
+              ''
+              '系统要求'
+              '    仅支持 Windows x64。'
+              ''
+              '运行时依赖'
+              '    net48 变体：需要 .NET Framework 4.8（Windows 10 1903 及以上系统自带）。'
+              '    net10-x64 变体：自包含发布，不需要预装任何 .NET 运行时。'
+              ''
+              '说明'
+              '    仓库 Graphical applications/ 下只有 "Graphical application moved.txt"，'
+              '    带商业功能的 ArsenalImageMounter.exe 主程序已移至 https://ArsenalRecon.com 。'
+              '    本包内是仓库内真实存在的开源 GUI 工具（ArsenalImageMounterMountTool）。'
+            )
+          }
           Set-Content -LiteralPath "$dist/README.txt" -Value $readme -Encoding UTF8
 
           Write-Host '--- 产物 ---'
-          Get-ChildItem -LiteralPath $dist | Select-Object Name, Length |
-            Format-Table -AutoSize | Out-String | Write-Host
-          Get-ChildItem -LiteralPath $dist -Recurse -Filter *.exe |
-            ForEach-Object { Write-Host ("  {0,-42} {1,10}" -f $_.Name, $_.Length) }
+          Get-ChildItem -LiteralPath $dist -Recurse -File |
+            ForEach-Object { Write-Host ("  {0,-46} {1,12:N0}" -f $_.Name, $_.Length) }
 
       - name: Package (${{ matrix.variant }})
         shell: pwsh
