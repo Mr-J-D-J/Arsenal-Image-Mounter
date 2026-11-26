@@ -1,59 +1,247 @@
-name: Build Arsenal Image Mounter GUI
+# =============================================================================
+# Arsenal Image Mounter — GUI 构建（主工作流，push 自动触发）
+# =============================================================================
+#
+# 为什么构建这个项目
+# ------------------
+# 仓库里没有独立的 ArsenalImageMounter.exe 主程序：Graphical applications/ 下只有
+# "Graphical application moved.txt"，商业版 GUI 已移到 ArsenalRecon.com。
+#
+# 仓库内真正的可视化挂载工具是 Managed Source/ArsenalImageMounterMountTool：
+#   * ArsenalImageMounterMountTool.vbproj 里 <OutputType>WinExe</OutputType>
+#   * MainModule.vb 有 Public Sub Main()
+#   * MainForm.Designer.vb 是完整挂载界面（Mount raw / DiscUtils / libewf /
+#     libaff4 / libqcow、设备列表、RAM disk、Rescan SCSI bus）
+#   * MainForm.vb:814 InstallDriver() 会从内嵌的 DriverSetup/DriverFiles.zip
+#     自动安装驱动，所以它就是"可视化界面 + 不含开发工具"的成品。
+#
+# 为什么必须用 .NET 11 SDK
+# ------------------------
+# Managed Source/Directory.Build.props 里
+#   <TargetFrameworks>net48;netstandard2.1;net10.0;net11.0</TargetFrameworks>
+# 用 9.x SDK 会直接 NETSDK1045（当前 SDK 不支持目标框架）。
+#
+# 为什么发布的是 net48 和 net10.0-windows 两个变体
+# ------------------------------------------------
+#   net48        目标机只要装了 .NET Framework 4.8（Win10 1903+ 自带）即可运行，
+#                产物约 11 MB —— 最常用的分发形态。
+#   net10-x64    自包含，不需要任何运行时，产物约 127 MB。
+#
+# 注意：Arsenal.ImageMounter.Forms 是**类库**（没有 Program.cs / Main），
+#       不能用 -p:OutputType=WinExe 强行发布成 exe。
+# =============================================================================
+
+name: build-gui
 
 on:
   push:
     branches: [ master, main ]
+    tags: [ 'v*' ]
+    paths-ignore:
+      - '**.md'
+      - 'Third-Party-Licenses/**'
+      - 'libewf/**'
+      - 'Unmanaged Source/**'
   pull_request:
     branches: [ master, main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+  CONFIGURATION: Release
+  DOTNET_SDK_VERSION: '11.0.x'
+
 jobs:
-  build-gui:
+  gui:
+    name: GUI (${{ matrix.variant }})
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: net48
+            tfm: net48
+            rid: ''
+          - variant: net10-x64
+            tfm: net10.0-windows
+            rid: win-x64
 
     steps:
-    - name: 1. 拉取仓库代码
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: 2. 配置 .NET SDK
-      uses: actions/setup-dotnet@v4
-      with:
-        # 项目里有 net10.0-windows，使用最新的 .NET 9 SDK 保证兼容性
-        dotnet-version: '9.0.x'
+      - name: Setup .NET SDK ${{ env.DOTNET_SDK_VERSION }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
 
-    - name: 3. 动态查找并发布 GUI 程序
-      shell: pwsh
-      run: |
-        Write-Host "==================== 开始搜索 GUI 项目 ===================="
-        
-        # 动态搜索 Managed Source 下的 Forms 项目，彻底避免路径拼写错误
-        $guiProj = Get-ChildItem -Path "Managed Source" -Recurse -Filter "*Forms*.csproj" | Select-Object -First 1
-        
-        if (-not $guiProj) {
-          Write-Error "❌ 未在 Managed Source 下找到 Forms 项目文件！请检查目录结构。"
-          exit 1
-        }
-        
-        Write-Host "✅ 找到 GUI 项目路径: $($guiProj.FullName)"
-        Write-Host "==================== 开始发布 GUI ===================="
-        
-        # 执行发布
-        # -f net10.0-windows：指定框架（之前日志已确认支持）
-        # -p:OutputType=WinExe：强制将其编译为 Windows 可执行程序（.exe），防止它默认编译成类库
-        dotnet publish $guiProj.FullName -c Release -f net10.0-windows -r win-x64 --self-contained true -p:OutputType=WinExe -o ./publish/GUI
-        
-        if ($LASTEXITCODE -ne 0) {
-          Write-Error "❌ GUI 发布失败！请查看上方日志。"
-          exit 1
-        }
-        
-        Write-Host "✅ GUI 发布成功！"
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.vbproj', '**/*.props') }}
+          restore-keys: nuget-${{ runner.os }}-
 
-    - name: 4. 上传构建产物
-      uses: actions/upload-artifact@v4
-      with:
-        name: ArsenalImageMounter-GUI
-        path: |
-          ./publish/GUI/**
-        if-no-files-found: warn
+      - name: Preflight
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          dotnet --info
+          $sdks = dotnet --list-sdks
+          if (-not ($sdks | Where-Object { $_ -match '^11\.' })) {
+            throw "缺少 11.x SDK。Directory.Build.props 的 TargetFrameworks 含 net11.0，没有 11.x SDK 必然 NETSDK1045。"
+          }
+
+          # 稀疏检出 / 部分克隆时容易漏掉这些，提前给出明确报错。
+          $required = @(
+            'Managed Source/Directory.Build.props',
+            'Managed Source/ArsenalImageMounterMountTool/ArsenalImageMounterMountTool.vbproj',
+            'Managed Source/ArsenalImageMounterGUISetup/ArsenalImageMounterGUISetup.vbproj',
+            'DriverSetup/DriverFiles.zip'
+          )
+          foreach ($p in $required) {
+            if (-not (Test-Path -LiteralPath $p)) { throw "缺少必需文件: $p" }
+          }
+          Write-Host "DriverFiles.zip = $((Get-Item 'DriverSetup/DriverFiles.zip').Length) 字节（会被内嵌进 exe）"
+
+      - name: Publish MountTool + GUISetup (${{ matrix.variant }})
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $tfm = '${{ matrix.tfm }}'
+          $rid = '${{ matrix.rid }}'
+          $dist = "dist/ArsenalImageMounter-GUI-${{ matrix.variant }}"
+
+          function Publish-Aim {
+            param([string]$Project, [string]$OutDir)
+
+            if (-not (Test-Path -LiteralPath $Project)) { throw "项目文件不存在: $Project" }
+
+            # GeneratePackageOnBuild=false 必须加：Release 下各库项目默认触发 pack，
+            # 而 Directory.Build.props 把 PackageOutputPath 设为 $(LocalNuGetPath)（未定义 -> 空路径）。
+            $dargs = @(
+              'publish', $Project
+              '-c', $env:CONFIGURATION
+              '-f', $tfm
+              '-o', $OutDir
+              '-p:GeneratePackageOnBuild=false'
+              '-p:DebugType=None'
+              '-p:DebugSymbols=false'
+            )
+            # net48 不支持 RID / self-contained，只有 netX.0 才能指定。
+            if ($rid) { $dargs += @('-r', $rid, '--self-contained', 'true') }
+
+            Write-Host "dotnet $($dargs -join ' ')"
+            dotnet @dargs
+            if ($LASTEXITCODE -ne 0) { throw "发布失败: $Project (退出码 $LASTEXITCODE)" }
+
+            # 清掉调试符号和文档。注意 PS 5.1 下
+            # `Get-ChildItem -Include ... | Remove-Item` 在结果为空时会抛 NullReferenceException，
+            # 所以先收集成数组再逐个删。
+            $junk = @(Get-ChildItem -LiteralPath $OutDir -Recurse -File -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Extension -in '.pdb', '.xml' })
+            foreach ($f in $junk) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+          }
+
+          Publish-Aim 'Managed Source/ArsenalImageMounterMountTool/ArsenalImageMounterMountTool.vbproj' "$dist/MountTool"
+          Publish-Aim 'Managed Source/ArsenalImageMounterGUISetup/ArsenalImageMounterGUISetup.vbproj' "$dist/DriverSetup"
+
+          # 这里用字符串数组而不是 here-string：here-string 的结束符 "@ 必须顶格写，
+          # 而 YAML 块标量要求所有续行都有缩进，顶格会直接把 YAML 解析搞崩。
+          $readme = @(
+            "Arsenal Image Mounter — GUI (${{ matrix.variant }})"
+            '===================================================='
+            ''
+            'MountTool\ArsenalImageMounterMountTool.exe'
+            '    可视化挂载工具。直接双击运行，首次启动会提示安装虚拟 SCSI 驱动'
+            '    （驱动已内嵌在 exe 里，来自 DriverSetup/DriverFiles.zip，无需联网）。'
+            '    需要管理员权限。'
+            ''
+            'DriverSetup\ArsenalImageMounterGUISetup.exe'
+            '    独立的驱动安装/卸载器。只想装驱动、不想开挂载界面时用它。'
+            ''
+            '系统要求'
+            '    仅支持 Windows x64。'
+            ''
+            '运行时依赖'
+            '    net48 变体：需要 .NET Framework 4.8（Windows 10 1903 及以上系统自带）。'
+            '    net10-x64 变体：自包含发布，不需要预装任何 .NET 运行时。'
+            ''
+            '说明'
+            '    仓库 Graphical applications/ 下只有 "Graphical application moved.txt"，'
+            '    带商业功能的 ArsenalImageMounter.exe 主程序已移至 https://ArsenalRecon.com 。'
+            '    本包内是仓库内真实存在的开源 GUI 工具（ArsenalImageMounterMountTool）。'
+          )
+          Set-Content -LiteralPath "$dist/README.txt" -Value $readme -Encoding UTF8
+
+          Write-Host '--- 产物 ---'
+          Get-ChildItem -LiteralPath $dist | Select-Object Name, Length |
+            Format-Table -AutoSize | Out-String | Write-Host
+          Get-ChildItem -LiteralPath $dist -Recurse -Filter *.exe |
+            ForEach-Object { Write-Host ("  {0,-42} {1,10}" -f $_.Name, $_.Length) }
+
+      - name: Package (${{ matrix.variant }})
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $folder = "ArsenalImageMounter-GUI-${{ matrix.variant }}"
+          $zip = "$folder.zip"
+
+          # 进到 dist 再压，保证 zip 里顶层是干净的文件夹名，而不是 dist/... 前缀。
+          Push-Location 'dist'
+          try {
+            # 总量可达 130 MB，Compress-Archive 在这个量级上很慢且吃内存，
+            # 优先用 windows-latest 自带的 7-Zip。
+            $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+            if (Test-Path -LiteralPath $sevenZip) {
+              & $sevenZip a -tzip -mx=5 "..\$zip" $folder | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "7z 打包失败 (退出码 $LASTEXITCODE)" }
+            }
+            else {
+              Compress-Archive -Path "$folder/*" -DestinationPath "..\$zip" -Force
+            }
+          }
+          finally { Pop-Location }
+
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          "$hash  $zip" | Set-Content -LiteralPath "$zip.sha256" -Encoding ASCII
+          Get-Item -LiteralPath $zip | Select-Object Name, Length |
+            Format-Table -AutoSize | Out-String | Write-Host
+          Write-Host "SHA256: $hash"
+
+      - name: Upload ${{ matrix.variant }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArsenalImageMounter-GUI-${{ matrix.variant }}
+          path: |
+            ArsenalImageMounter-GUI-${{ matrix.variant }}.zip
+            ArsenalImageMounter-GUI-${{ matrix.variant }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Attach to GitHub Release
+    needs: gui
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
