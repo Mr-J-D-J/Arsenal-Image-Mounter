@@ -18,6 +18,12 @@
 
 一句话区别：**`build.yml` = 日常自动出 GUI 成品；`build-all.yml` = 手动出全套（含 CLI / 包 / 测试）。**
 
+> **下载下来的 artifact 是什么形态？**
+> `upload-artifact` 自己就会把上传内容打成一个 zip，所以你在 Actions 页面下的
+> `ArsenalImageMounter-GUI-xxx.zip` 解开后**直接就是一个文件夹**（顶层只有一个
+> `ArsenalImageMounter-GUI-xxx/`，里面是 exe 和 dll），**不会再有第二层 zip**。
+> 解压时用资源管理器、7-Zip 都行，不需要任何密码。
+
 ---
 
 ## 1. 两个工作流，各管什么
@@ -31,12 +37,13 @@
 
 | 变体 | TFM / RID | 形态 | 解压后体积 | 目标机要求 |
 | --- | --- | --- | --- | --- |
-| `net10-x64-single` **（默认）** | `net10.0-windows` / `win-x64` | **单文件 exe**，双击即用 | 约 115 MB（2 个 exe 各约 57 MB） | 无，自包含 |
-| `net48` | `net48` / 无 RID | 文件夹（exe + 一堆 dll） | 约 13 MB | .NET Framework 4.8（Win10 1903+ 自带） |
-| `net10-x64` | `net10.0-windows` / `win-x64` | 文件夹（exe + 一堆 dll） | 约 103 MB | 无，自包含 |
+| `net10-x64-single` **（默认）** | `net10.0-windows` / `win-x64` | **单文件 exe**，双击即用 | 约 116 MB（2 个 exe 各约 57 MB） | 无，自包含 |
+| `net48` | `net48` / 无 RID | 文件夹（exe + 一堆 dll） | 约 13.8 MB | .NET Framework 4.8（Win10 1903+ 自带） |
+| `net10-x64` | `net10.0-windows` / `win-x64` | 文件夹（exe + 一堆 dll） | 约 110 MB | 无，自包含 |
 
-`net10-x64-single` 是矩阵里的**第一项**，也就是默认产物。打 `v*` tag 时 `release` job 还会把
-zip 里那两个 `.exe` 单独拎出来挂到 Release 页面，这样别人可以直接下 exe，不用先解压。
+`net10-x64-single` 是矩阵里的**第一项**，也就是默认产物。打 `v*` tag 时 `release` job 会
+用下载下来的 artifact 内容重新打三个 zip（`release-files/` 下，带 `.sha256`），并把单文件版
+里的两个 `.exe` 单独拎出来一起挂到 Release 页面，这样别人可以直接下 exe，不用先解压。
 
 ---
 
@@ -198,16 +205,48 @@ $lines = @(
 Set-Content -LiteralPath "$dist/README.txt" -Value $lines -Encoding UTF8
 ```
 
-### 5.7 上传大文件优先用 7-Zip
+### 5.7 绝对不要把自打的 zip 再交给 `upload-artifact`
+
+`upload-artifact` **自己就会把上传内容打成一个 zip**。如果先自己 `Compress-Archive` 出一个
+`.zip` 再上传它，用户下载后拿到的是"zip 里还有 zip"，**双击内层时 Windows 资源管理器会弹
+「需要密码 / 此文件受密码保护」**——而文件其实一点加密都没有（实测：所有条目 local header
+的加密位 bit0 全为 0，`7z t` 报 `Encrypted = -`，SHA256 与 CI digest 完全一致）。
+
+正确做法：**只上传产物目录**。
+
+```yaml
+- uses: actions/upload-artifact@v4
+  with:
+    name: ArsenalImageMounter-GUI-${{ matrix.variant }}
+    path: dist            # 目录，不是 zip
+    if-no-files-found: error
+```
+
+需要 zip 的场合（比如发 Release）在**下游 job** 里从下载到的 artifact 内容重新打：
+
+```powershell
+$inner = Join-Path $src $name
+$from = if (Test-Path -LiteralPath $inner) { $inner } else { $src }   # 归一化顶层文件夹
+Copy-Item -Path (Join-Path $from '*') -Destination $stage -Recurse -Force
+Push-Location $stageRoot
+& $sevenZip a -tzip -mx=5 $zip $name
+Pop-Location
+```
+
+### 5.8 打包大文件优先用 7-Zip
 
 产物可达 130 MB，`Compress-Archive` 在这个量级上很慢且吃内存。`windows-latest` 自带
 `C:\Program Files\7-Zip\7z.exe`，优先用它，失败再回退 `Compress-Archive`。
 
-### 5.8 打包前先 `Push-Location dist`
+（注意：本机 7-Zip 装在 `D:\7-Zip\7z.exe`，**不在** `C:\Program Files\7-Zip`，
+本地复现 CI 行为时要改路径。）
 
-否则 zip 里的顶层会带 `dist/...` 前缀，解压出来多一层目录。
+### 5.9 打包前先 `Push-Location` 到父目录
 
-### 5.9 `Get-ChildItem -Include ... | Remove-Item` 在结果为空时会崩
+`& $sevenZip a -tzip $zip $name` 要在 `$name` 的**父目录**执行，否则 zip 顶层会带
+`dist/...` 之类的路径前缀，解压出来多一层目录。
+
+### 5.10 `Get-ChildItem -Include ... | Remove-Item` 在结果为空时会崩
 
 PowerShell 5.1 下会抛 `Remove-Item : Object reference not set to an instance of an object.`。
 先收集成数组再逐个删：
@@ -218,18 +257,18 @@ $junk = @(Get-ChildItem -LiteralPath $OutDir -Recurse -File |
 foreach ($f in $junk) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
 ```
 
-### 5.10 `$args` 是自动变量，函数里别当普通变量用
+### 5.11 `$args` 是自动变量，函数里别当普通变量用
 
 会报 `The variable '$args' cannot be retrieved because it has not been set`。改名成 `$dargs`，
 splat 写成 `dotnet @dargs`。
 
-### 5.11 本地跑 PS 5.1 时脚本要存成 UTF-8 **with BOM**
+### 5.12 本地跑 PS 5.1 时脚本要存成 UTF-8 **with BOM**
 
 否则 `powershell.exe` 按 GBK 读中文注释，会出现一堆
 `You must provide a value expression following the '-' operator` 之类的假语法错误。
 （CI 里是 `pwsh` 7，没这个问题；但本地调试时很容易被这个坑住。）
 
-### 5.12 测试用例有 3 个需要管理员权限
+### 5.13 测试用例有 3 个需要管理员权限
 
 `TestProject` 共 16 个用例，其中 `Version.ValidateAuthenticodeWinPE64`、
 `Win32API.PartitionTests`、`Win32API.QueryDefaultReparsePoints` 需要管理员 + 已安装驱动，
@@ -239,18 +278,18 @@ CI 里必然失败。所以 `build-all.yml` 的 `tests` job 是 `workflow_dispat
 （`You must install or update .NET to run this application. Framework: 'Microsoft.NETCore.App', version '10.0.0'`），
 测试统一用 `-f net11.0-windows`。
 
-### 5.13 驱动是内嵌进 exe 的
+### 5.14 驱动是内嵌进 exe 的
 
 `DriverFiles.zip` 有 2,977,579 字节，被 `<EmbeddedResource>` 编进 Setup 和 MountTool。
 验证方法：产物里的 `ArsenalImageMounterGUISetup.dll` 约 2,992,128 字节，比 zip 略大，
 说明确实打进去了。所以这些 exe 不需要联网、不需要旁边放驱动包。
 
-### 5.14 `Arsenal.ImageMounter.Native` 的 nupkg 不含 dll 本体
+### 5.15 `Arsenal.ImageMounter.Native` 的 nupkg 不含 dll 本体
 
 它的 `IncludeBuildOutput=false`，只打包 `runtimes\**\native\*`。`runtimes/` 下有
 `win-x86` / `win-x64` / `win-arm` / `win-arm64` 四个目录。
 
-### 5.15 非托管部分不在 CI 里
+### 5.16 非托管部分不在 CI 里
 
 `Unmanaged Source/ArsenalImageMounter.sln` 是 vcxproj，需要 **WDK 8.1+** 和完整 VS 工具链，
 `windows-latest` 上的托管 SDK 构不出来。驱动本身用的是仓库里预编译好的 `DriverSetup/DriverFiles.zip`，
