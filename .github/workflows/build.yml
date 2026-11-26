@@ -30,6 +30,12 @@
 #                      解压后约 13 MB —— 体积最小，但必须整个文件夹一起拷。
 #   net10-x64          自包含，不需要任何运行时，解压后约 103 MB，同样是文件夹。
 #
+# 下载下来的 artifact 长什么样
+# ----------------------------
+# GitHub 的 upload-artifact 本身就会把上传内容打成一个 zip，所以这里**只上传产物
+# 文件夹**，绝不能再上传自己打的 zip —— 否则就成了 "zip 里还有一个 zip"，
+# 双击内层时 Windows 资源管理器会误报「受密码保护」（文件其实一点加密都没有）。
+#
 # 注意：Arsenal.ImageMounter.Forms 是**类库**（没有 Program.cs / Main），
 #       不能用 -p:OutputType=WinExe 强行发布成 exe。
 # =============================================================================
@@ -259,43 +265,24 @@ jobs:
           Get-ChildItem -LiteralPath $dist -Recurse -File |
             ForEach-Object { Write-Host ("  {0,-46} {1,12:N0}" -f $_.Name, $_.Length) }
 
-      - name: Package (${{ matrix.variant }})
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $folder = "ArsenalImageMounter-GUI-${{ matrix.variant }}"
-          $zip = "$folder.zip"
-
-          # 进到 dist 再压，保证 zip 里顶层是干净的文件夹名，而不是 dist/... 前缀。
-          Push-Location 'dist'
-          try {
-            # 总量可达 130 MB，Compress-Archive 在这个量级上很慢且吃内存，
-            # 优先用 windows-latest 自带的 7-Zip。
-            $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
-            if (Test-Path -LiteralPath $sevenZip) {
-              & $sevenZip a -tzip -mx=5 "..\$zip" $folder | Out-Null
-              if ($LASTEXITCODE -ne 0) { throw "7z 打包失败 (退出码 $LASTEXITCODE)" }
-            }
-            else {
-              Compress-Archive -Path "$folder/*" -DestinationPath "..\$zip" -Force
-            }
-          }
-          finally { Pop-Location }
-
-          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-          "$hash  $zip" | Set-Content -LiteralPath "$zip.sha256" -Encoding ASCII
-          Get-Item -LiteralPath $zip | Select-Object Name, Length |
-            Format-Table -AutoSize | Out-String | Write-Host
-          Write-Host "SHA256: $hash"
-
-      - name: Upload ${{ matrix.variant }}
+      # 只上传产物文件夹，不再自己打 zip。
+      # 原因：upload-artifact 一定会把上传内容再包一层 zip，如果再上传一个 .zip，
+      # 用户拿到的就是 "zip 里还有 zip"，双击内层时资源管理器会弹「受密码保护」。
+      - name: Upload ${{ matrix.variant }}（单文件，解压即得 exe）
+        if: matrix.single == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ArsenalImageMounter-GUI-${{ matrix.variant }}
-          path: |
-            ArsenalImageMounter-GUI-${{ matrix.variant }}.zip
-            ArsenalImageMounter-GUI-${{ matrix.variant }}.zip.sha256
+          path: dist/ArsenalImageMounter-GUI-${{ matrix.variant }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload ${{ matrix.variant }}（文件夹版）
+        if: matrix.single != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArsenalImageMounter-GUI-${{ matrix.variant }}
+          path: dist
           if-no-files-found: error
           retention-days: 30
 
@@ -314,26 +301,52 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path release-files | Out-Null
 
-          # 所有 zip / sha256 直接作为 release 资产
-          Get-ChildItem -Path artifacts -Recurse -File |
-            Where-Object { $_.Extension -in '.zip', '.sha256' } |
-            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination release-files -Force }
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          $releaseFiles = (New-Item -ItemType Directory -Force -Path 'release-files').FullName
+          $stageRoot = Join-Path $env:RUNNER_TEMP 'stage'
+          New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
 
-          # 单文件变体再把两个 exe 单独拎出来，这样 Release 页面可以直接下 .exe，
-          # 不用先解压 zip —— 这就是"直接生成 exe"的那个。
-          $single = Get-ChildItem -Path artifacts -Recurse -File -Filter 'ArsenalImageMounter-GUI-net10-x64-single.zip' |
-                    Select-Object -First 1
-          if (-not $single) { throw "找不到 net10-x64-single 的 zip，无法提取单文件 exe" }
+          foreach ($v in @('net10-x64-single', 'net48', 'net10-x64')) {
+            $name = "ArsenalImageMounter-GUI-$v"
+            $src = Join-Path 'artifacts' $name
+            if (-not (Test-Path -LiteralPath $src)) { throw "缺少 artifact: $name" }
 
-          $tmp = Join-Path $env:RUNNER_TEMP 'single'
-          Expand-Archive -LiteralPath $single.FullName -DestinationPath $tmp -Force
-          $exes = @(Get-ChildItem -Path $tmp -Recurse -File -Filter *.exe)
-          if ($exes.Count -eq 0) { throw "单文件 zip 里没有 exe" }
-          foreach ($e in $exes) { Copy-Item -LiteralPath $e.FullName -Destination release-files -Force }
+            # upload-artifact 是否保留顶层文件夹取决于上传路径，这里统一归一化：
+            # 内容一律摊平到 stage/<name>/ 下，保证打出来的 zip 顶层永远是一个干净文件夹。
+            $stage = Join-Path $stageRoot $name
+            if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-          Get-ChildItem -LiteralPath release-files | Select-Object Name, Length |
+            $inner = Join-Path $src $name
+            $from = if (Test-Path -LiteralPath $inner) { $inner } else { $src }
+            Copy-Item -Path (Join-Path $from '*') -Destination $stage -Recurse -Force
+
+            $zip = Join-Path $releaseFiles "$name.zip"
+            if (Test-Path -LiteralPath $sevenZip) {
+              Push-Location $stageRoot
+              try {
+                & $sevenZip a -tzip -mx=5 $zip $name | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "7z 打包失败: $name (退出码 $LASTEXITCODE)" }
+              }
+              finally { Pop-Location }
+            }
+            else {
+              Compress-Archive -Path $stage -DestinationPath $zip -Force
+            }
+
+            $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+            "$hash  $name.zip" | Set-Content -LiteralPath "$zip.sha256" -Encoding ASCII
+
+            # 单文件变体额外把两个 exe 单独挂出来，Release 页面可以直接下 .exe。
+            if ($v -eq 'net10-x64-single') {
+              $exes = @(Get-ChildItem -LiteralPath $stage -Recurse -File -Filter *.exe)
+              if ($exes.Count -eq 0) { throw "单文件变体里没有 exe" }
+              foreach ($e in $exes) { Copy-Item -LiteralPath $e.FullName -Destination $releaseFiles -Force }
+            }
+          }
+
+          Get-ChildItem -LiteralPath $releaseFiles | Select-Object Name, Length |
             Format-Table -AutoSize | Out-String | Write-Host
 
       - name: Publish release
